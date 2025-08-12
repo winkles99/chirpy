@@ -1,10 +1,47 @@
 package main
 import (
+    "fmt"
     "net/http"
+    "sync/atomic"
 )
+//api configuration to manage file server metrics
+type apiConfig struct {
+    fileserverHits atomic.Int32
+}
+
+//Middleware to increment hit counter
+func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        cfg.fileserverHits.Add(1) // thread-safe increment
+        next.ServeHTTP(w, r)
+    })
+}
+
+//Hit Shower
+func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "text/plain; charset=utf-8") //Set Content Type
+    hits := cfg.fileserverHits.Load() //reads the current value
+    fmt.Fprintf(w, "Hits: %d", hits)
+}
+
+//reset metrics
+func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
+    cfg.fileserverHits.Store(0) //reset
+    w.WriteHeader(http.StatusOK)
+    w.Header().Set("Content-Type", "text/plain; charset=utf-8") //set content type
+    w.Write([]byte("Hits reset to 0")) 
+
+}
+
 
 func main() {
+    apiCfg := &apiConfig{}
     mux := http.NewServeMux()
+
+    //file server
+	fsHandler := http.StripPrefix("/app/", http.FileServer(http.Dir(".")))
+	mux.Handle("/app/", apiCfg.middlewareMetricsInc(fsHandler))
+    
     //Readiness endpoint at .healthz
     mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
         w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -12,10 +49,9 @@ func main() {
         w.Write([]byte("OK"))
     })
 
-    fileServer := http.FileServer(http.Dir("."))
-    mux.Handle("/app/", http.StripPrefix("/app/", fileServer))
+    mux.HandleFunc("/metrics", apiCfg.handlerMetrics)
+    mux.HandleFunc("/reset", apiCfg.handlerReset)
 
-    mux.Handle("/", fileServer)
     server := http.Server{
         Addr:    ":8080",
         Handler: mux,

@@ -118,6 +118,10 @@ func main() {
 		apiCfg.handlerReset(w, r)
 	})
 
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/app/", http.StatusFound)
+	})
+
 	mux.HandleFunc("/api/validate_chirp", apiCfg.handlerValidateChirp)
 
 	server := http.Server{

@@ -4,38 +4,70 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
+	"unicode"
 )
 
-// api configuration to manage file server metrics
+// Profanity list
+var profanity = []string{"kerfuffle", "sharbert", "fornax"}
+
+// Helper to respond with JSON
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(payload)
+}
+
+// Strip punctuation for word matching
+func stripPunct(word string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			return r
+		}
+		return -1
+	}, word)
+}
+
+// Replace profane words in a chirp
+func cleanChirp(body string) string {
+	words := strings.Split(body, " ")
+	for i, word := range words {
+		lowerWord := strings.ToLower(stripPunct(word))
+		for _, profane := range profanity {
+			if lowerWord == profane {
+				words[i] = "****"
+				break
+			}
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+// API config to track hits
 type apiConfig struct {
 	fileserverHits atomic.Int32
 }
 
-// request struct for chirp validation
+// Request struct
 type chirpRequest struct {
 	Body string `json:"body"`
 }
 
-// response struct for error messages
+// Error response struct
 type errorResponse struct {
 	Error string `json:"error"`
-}
-
-// response struct for valid chirps
-type validResponse struct {
-	Valid bool `json:"valid"`
 }
 
 // Middleware to increment hit counter
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg.fileserverHits.Add(1) // thread-safe increment
+		cfg.fileserverHits.Add(1)
 		next.ServeHTTP(w, r)
 	})
 }
 
-// Hit Shower
+// Metrics handler
 func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	hits := cfg.fileserverHits.Load()
@@ -47,11 +79,10 @@ func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
   </body>
 </html>
 `, hits)
-
 	fmt.Fprint(w, html)
 }
 
-// reset metrics
+// Reset metrics
 func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -59,7 +90,7 @@ func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Hits reset to 0"))
 }
 
-// ✅ Now a method on *apiConfig
+// Validate chirp handler
 func (cfg *apiConfig) handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -68,30 +99,28 @@ func (cfg *apiConfig) handlerValidateChirp(w http.ResponseWriter, r *http.Reques
 
 	var req chirpRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(errorResponse{Error: "Something went wrong"})
+		respondWithJSON(w, http.StatusBadRequest, errorResponse{Error: "Something went wrong"})
 		return
 	}
 
 	if len(req.Body) > 140 {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(errorResponse{Error: "Chirp is too long"})
+		respondWithJSON(w, http.StatusBadRequest, errorResponse{Error: "Chirp is too long"})
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(validResponse{Valid: true})
+	cleaned := cleanChirp(req.Body)
+	respondWithJSON(w, http.StatusOK, map[string]string{"cleaned_body": cleaned})
 }
 
 func main() {
 	apiCfg := &apiConfig{}
 	mux := http.NewServeMux()
 
-	// file server
+	// File server
 	fsHandler := http.StripPrefix("/app/", http.FileServer(http.Dir(".")))
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(fsHandler))
 
-	// readiness endpoint
+	// Health check
 	mux.HandleFunc("/api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -102,6 +131,7 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
+	// Admin endpoints
 	mux.HandleFunc("/admin/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -118,15 +148,19 @@ func main() {
 		apiCfg.handlerReset(w, r)
 	})
 
+	// Root redirect
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/app/", http.StatusFound)
 	})
 
+	// Chirp validation
 	mux.HandleFunc("/api/validate_chirp", apiCfg.handlerValidateChirp)
 
 	server := http.Server{
 		Addr:    ":8080",
 		Handler: mux,
 	}
+
+	fmt.Println("Server listening on http://localhost:8080")
 	server.ListenAndServe()
 }

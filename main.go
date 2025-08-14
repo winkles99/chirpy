@@ -1,8 +1,8 @@
 package main
 
 import (
+	"context"
 	"database/sql"
-	_ "github.com/lib/pq"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,12 +10,13 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unicode"
 
+	_ "github.com/lib/pq"
 	"github.com/joho/godotenv"
 	"github.com/winkles99/chirpy/internal/database"
 )
-
 
 // Profanity list
 var profanity = []string{"kerfuffle", "sharbert", "fornax"}
@@ -54,9 +55,11 @@ func cleanChirp(body string) string {
 
 // API config to track hits
 type apiConfig struct {
-    fileserverHits atomic.Int32
-    db             *database.Queries
+	fileserverHits atomic.Int32
+	db             *database.Queries
+	Platform       string
 }
+
 // Request struct
 type chirpRequest struct {
 	Body string `json:"body"`
@@ -65,6 +68,14 @@ type chirpRequest struct {
 // Error response struct
 type errorResponse struct {
 	Error string `json:"error"`
+}
+
+// User struct for API response
+type User struct {
+	ID        string `json:"id"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+	Email     string `json:"email"`
 }
 
 // Middleware to increment hit counter
@@ -90,12 +101,22 @@ func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, html)
 }
 
-// Reset metrics
+// Reset metrics and delete users
 func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Hits reset to 0"))
+
+	if cfg.Platform != "dev" {
+		w.WriteHeader(http.StatusForbidden)
+		respondWithJSON(w, http.StatusForbidden, errorResponse{Error: "Forbidden"})
+		return
+	}
+
+	if err := cfg.db.DeleteAllUsers(context.Background()); err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, errorResponse{Error: "Failed to delete users"})
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, map[string]string{"status": "Metrics and users reset"})
 }
 
 // Validate chirp handler
@@ -118,6 +139,38 @@ func (cfg *apiConfig) handlerValidateChirp(w http.ResponseWriter, r *http.Reques
 
 	cleaned := cleanChirp(req.Body)
 	respondWithJSON(w, http.StatusOK, map[string]string{"cleaned_body": cleaned})
+}
+
+// Create user handler
+func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var params struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+		respondWithJSON(w, http.StatusBadRequest, errorResponse{Error: "Invalid request"})
+		return
+	}
+
+	user, err := cfg.db.CreateUser(r.Context(), params.Email)
+	if err != nil {
+		log.Printf("Failed to create user: %v", err)
+		respondWithJSON(w, http.StatusInternalServerError, errorResponse{Error: "Failed to create user"})
+		return
+	}
+
+	resp := User{
+		ID:        user.ID.String(),
+		CreatedAt: user.CreatedAt.Format(time.RFC3339),
+		UpdatedAt: user.UpdatedAt.Format(time.RFC3339),
+		Email:     user.Email,
+	}
+
+	respondWithJSON(w, http.StatusCreated, resp)
 }
 
 func main() {
@@ -149,7 +202,8 @@ func main() {
 
 	// Initialize API config
 	apiCfg := &apiConfig{
-		db: dbQueries,
+		db:       dbQueries,
+		Platform: os.Getenv("PLATFORM"),
 	}
 
 	// Setup HTTP mux
@@ -186,6 +240,9 @@ func main() {
 		}
 		apiCfg.handlerReset(w, r)
 	})
+
+	// User creation endpoint
+	mux.HandleFunc("/api/users", apiCfg.handlerCreateUser)
 
 	// Root redirect
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

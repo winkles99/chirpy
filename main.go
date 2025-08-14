@@ -1,13 +1,21 @@
 package main
 
 import (
+	"database/sql"
+	_ "github.com/lib/pq"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"unicode"
+
+	"github.com/joho/godotenv"
+	"github.com/winkles99/chirpy/internal/database"
 )
+
 
 // Profanity list
 var profanity = []string{"kerfuffle", "sharbert", "fornax"}
@@ -46,9 +54,9 @@ func cleanChirp(body string) string {
 
 // API config to track hits
 type apiConfig struct {
-	fileserverHits atomic.Int32
+    fileserverHits atomic.Int32
+    db             *database.Queries
 }
-
 // Request struct
 type chirpRequest struct {
 	Body string `json:"body"`
@@ -113,7 +121,38 @@ func (cfg *apiConfig) handlerValidateChirp(w http.ResponseWriter, r *http.Reques
 }
 
 func main() {
-	apiCfg := &apiConfig{}
+	// Load .env file
+	if err := godotenv.Load(); err != nil {
+		log.Fatalf("Error loading .env file: %v", err)
+	}
+
+	// Get DB connection string
+	dbURL := os.Getenv("DB_URL")
+	if dbURL == "" {
+		log.Fatal("DB_URL not set")
+	}
+	log.Println("Connecting to database:", dbURL)
+
+	// Open database connection
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Failed to open database: %v", err)
+	}
+
+	// Ping DB to verify connection
+	if err := db.Ping(); err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+
+	// Create SQLC queries instance
+	dbQueries := database.New(db)
+
+	// Initialize API config
+	apiCfg := &apiConfig{
+		db: dbQueries,
+	}
+
+	// Setup HTTP mux
 	mux := http.NewServeMux()
 
 	// File server
